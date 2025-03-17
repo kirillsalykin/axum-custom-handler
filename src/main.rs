@@ -4,7 +4,7 @@ use axum::{
     http::Request,
     response::{IntoResponse, Response},
 };
-use axum::{routing::post, Router};
+use axum::{http::HeaderMap, routing::post, Router};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::{fmt::Debug, future::Future};
@@ -25,6 +25,18 @@ impl<F, Req, Res> ApiHandler<F, Req, Res> {
     }
 }
 
+enum ApiError {
+    InternalError,
+}
+
+type ApiResult<T> = Result<T, ApiError>;
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> axum::response::Response {
+        (axum::http::StatusCode::INTERNAL_SERVER_ERROR).into_response()
+    }
+}
+
 macro_rules! impl_api_handler {
     (
         [$($ty:ident),* $(,)?]
@@ -33,7 +45,7 @@ macro_rules! impl_api_handler {
         impl<F, Fut, S, Res, $( $ty, )* Req> Handler<($($ty,)* Req,), S> for ApiHandler<F, Req, Res>
         where
             F: FnOnce( $( $ty, )* Req ) -> Fut + Clone + Send + Sync + 'static,
-            Fut: Future<Output = Res> + Send + 'static,
+            Fut: Future<Output = ApiResult<Res>> + Send + 'static,
             $( $ty: FromRequestParts<S> + Send, )*
             Req: Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
             Res: Serialize + Clone + Send + Sync + 'static,
@@ -58,8 +70,10 @@ macro_rules! impl_api_handler {
                         Err(rejection) => return rejection.into_response(),
                     };
 
-                    let res: Res = (self.inner)($($ty,)* req).await;
-                    Json(res).into_response()
+                    match (self.inner)($($ty,)* req).await {
+                      Ok(res) => Json(res).into_response(),
+                      Err(err) => err.into_response()
+                    }
                 })
             }
         }
@@ -70,8 +84,10 @@ impl_api_handler!([]);
 impl_api_handler!([T1]);
 impl_api_handler!([T1, T2]);
 
-async fn handler(input: Input) -> Output {
-    Output { field: input.field }
+async fn handler(headers: HeaderMap, input: Input) -> ApiResult<Output> {
+    println!("{:?}", headers);
+    //Err(ApiError::InternalError)
+    Ok(Output { field: input.field })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
