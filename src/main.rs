@@ -1,5 +1,5 @@
 use axum::{
-    extract::{FromRequest, Json},
+    extract::{FromRequest, FromRequestParts, Json},
     handler::Handler,
     http::Request,
     response::{IntoResponse, Response},
@@ -7,7 +7,7 @@ use axum::{
 use axum::{routing::post, Router};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::future::Future;
+use std::{fmt::Debug, future::Future};
 use std::{marker::PhantomData, pin::Pin};
 
 #[derive(Clone)]
@@ -25,46 +25,61 @@ impl<F, Req, Res> ApiHandler<F, Req, Res> {
     }
 }
 
-impl<F, Fut, Req, Res, S> Handler<Request<axum::body::Body>, S> for ApiHandler<F, Req, Res>
-where
-    F: FnOnce(Req) -> Fut + Clone + Send + Sync + 'static,
-    Fut: Future<Output = Res> + Send,
-    Req: DeserializeOwned + Clone + Send + Sync + 'static,
-    Res: Serialize + Clone + Send + Sync + 'static,
-    S: Send + Sync + 'static,
-{
-    type Future = Pin<Box<dyn Future<Output = Response> + Send>>;
+macro_rules! impl_api_handler {
+    (
+        [$($ty:ident),* $(,)?]
+    ) => {
+        #[allow(non_snake_case, unused_mut)]
+        impl<F, Fut, S, Res, $( $ty, )* Req> Handler<($($ty,)* Req,), S> for ApiHandler<F, Req, Res>
+        where
+            F: FnOnce( $( $ty, )* Req ) -> Fut + Clone + Send + Sync + 'static,
+            Fut: Future<Output = Res> + Send + 'static,
+            $( $ty: FromRequestParts<S> + Send, )*
+            Req: Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
+            Res: Serialize + Clone + Send + Sync + 'static,
+            S: Send + Sync + 'static,
+        {
+            type Future = Pin<Box<dyn Future<Output = Response> + Send>>;
 
-    fn call(self, req: Request<axum::body::Body>, state: S) -> Self::Future {
-        Box::pin(async move {
-            let (parts, body) = req.into_parts();
-            let state = &state;
+            fn call(self, req: Request<axum::body::Body>, state: S) -> Self::Future {
+                Box::pin(async move {
+                    let (mut parts, body) = req.into_parts();
+                    let state = &state;
 
-            let Json(req) =
-                match Json::<Req>::from_request(Request::from_parts(parts, body), state).await {
-                    Ok(value) => value,
-                    Err(rejection) => return rejection.into_response(),
-                };
+                    $(
+                        let $ty = match $ty::from_request_parts(&mut parts, state).await {
+                            Ok(value) => value,
+                            Err(rejection) => return rejection.into_response(),
+                        };
+                    )*
 
-            let res: Res = (self.inner)(req).await;
-            return axum::response::Json(res).into_response();
-        })
-    }
+                    let Json(req) = match Json::<Req>::from_request(Request::from_parts(parts, body), state).await {
+                        Ok(value) => value,
+                        Err(rejection) => return rejection.into_response(),
+                    };
+
+                    let res: Res = (self.inner)($($ty,)* req).await;
+                    Json(res).into_response()
+                })
+            }
+        }
+    };
 }
 
-#[axum::debug_handler]`
-pub async fn handler(_input: Input) -> Output {
-    Output {
-        field: "bar".to_string(),
-    }
+impl_api_handler!([]);
+impl_api_handler!([T1]);
+impl_api_handler!([T1, T2]);
+
+async fn handler(input: Input) -> Output {
+    Output { field: input.field }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Input {
     field: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Output {
     field: String,
 }
