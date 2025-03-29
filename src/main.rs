@@ -1,215 +1,157 @@
-use axum::http::HeaderMap;
-use axum::{
-    Router,
-    extract::{FromRequest, FromRequestParts, Json},
-    handler::Handler,
-    http::Request,
-    response::{IntoResponse, Response},
-    routing::post,
-};
+use specta::Type;
 
-use serde::{Deserialize, Serialize};
-use specta::{Type, ts};
-use std::{fmt::Debug, future::Future};
-use std::{marker::PhantomData, pin::Pin};
+use std::marker::PhantomData;
 
 #[derive(Clone)]
-pub struct ApiHandler<F, Input, Output> {
+pub struct Procedure<F, Extractors, Input, Output, Error> {
     inner: F,
-    _marker: PhantomData<(Input, Output)>,
+    _marker: PhantomData<(Extractors, Input, Output, Error)>,
 }
 
-pub trait IntoApiHandler<Input, Output> {
-    type Handler;
-    fn into_api_handler(self) -> Self::Handler;
+pub trait IntoProcedure<const ARITY: usize, Extractors, Input, Output, Error> {
+    type Procedure;
+    fn into_procedure(self) -> Self::Procedure;
 }
 
-macro_rules! impl_iah {
-  ([$($ty:ident),* $(,)?]) => {
-        impl<F, Fut, $($ty,)* Output> IntoApiHandler<( $($ty,)* ), Output>
-        for F
-        where
-            F: FnOnce( $($ty,)* ) -> Fut + Clone + Send + Sync + 'static,
-            Fut: Future<Output = ApiResult<Output>> + Send + 'static,
-            Output: Serialize + Clone + Send + Sync + 'static,
-        {
-            type Handler = ApiHandler<F, ( $( $ty, )* ), Output>;
+pub struct NoInput;
 
-            fn into_api_handler(self) -> Self::Handler {
-                ApiHandler {
-                    inner: self,
-                    _marker: PhantomData,
-                }
-            }
+impl<F, Fut, Input, Output, Error> IntoProcedure<1, (), Input, Output, Error> for F
+where
+    F: FnOnce(Input) -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future<Output = Result<Output, Error>> + Send + 'static,
+    Input: Type + Clone + Send + Sync + 'static,
+    Output: Type + Clone + Send + Sync + 'static,
+    Error: Type + Clone + Send + Sync + 'static,
+{
+    type Procedure = Procedure<F, (), Input, Output, Error>;
+
+    fn into_procedure(self) -> Self::Procedure {
+        Procedure {
+            inner: self,
+            _marker: PhantomData,
         }
     }
 }
 
-impl_iah!([]);
-impl_iah!([T1]);
-impl_iah!([T1, T2]);
+impl<F, Fut, T1, Output, Error> IntoProcedure<1, (T1,), (), Output, Error> for F
+where
+    F: FnOnce(T1) -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future<Output = Result<Output, Error>> + Send + 'static,
+    Output: Type + Clone + Send + Sync + 'static,
+    Error: Type + Clone + Send + Sync + 'static,
+{
+    type Procedure = Procedure<F, (T1,), (), Output, Error>;
 
-macro_rules! impl_into_api_handler {
-    ([$($ty:ident),* $(,)?]) => {
-        impl<F, Fut, $($ty,)* Output> From<F> for ApiHandler<F, ( $($ty,)* ), Output>
-        where
-            F: FnOnce( $($ty,)* ) -> Fut + Clone + Send + Sync + 'static,
-            Fut: Future<Output = ApiResult<Output>> + Send + 'static,
-            Output: Clone + Send + Sync + 'static,
-        {
-            fn from(f: F) -> Self {
-                ApiHandler {
-                    inner: f,
-                    _marker: PhantomData,
-                }
-            }
+    fn into_procedure(self) -> Self::Procedure {
+        Procedure {
+            inner: self,
+            _marker: PhantomData,
         }
     }
 }
 
-impl_into_api_handler!([]);
-impl_into_api_handler!([T1]);
-impl_into_api_handler!([T1, T2]);
+impl<F, Fut, T1, Input, Output, Error> IntoProcedure<2, (T1,), Input, Output, Error> for F
+where
+    F: FnOnce(T1, Input) -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future<Output = Result<Output, Error>> + Send + 'static,
+    Input: Type + Clone + Send + Sync + 'static,
+    Output: Type + Clone + Send + Sync + 'static,
+    Error: Type + Clone + Send + Sync + 'static,
+{
+    type Procedure = Procedure<F, (T1,), Input, Output, Error>;
 
-macro_rules! impl_handler {
-    (
-        [$($ty:ident),*], $last:ident
-    ) => {
-        #[allow(non_snake_case, unused_mut)]
-        impl<F, Fut, S, $($ty,)* $last, Output> Handler<(Output, $($ty,)* $last, ), S>
-        for ApiHandler<F, ( $($ty,)* $last,), Output>
-        where
-            F: FnOnce( $( $ty, )* $last, ) -> Fut + Clone + Send + Sync + 'static,
-            Fut: Future<Output = ApiResult<Output>> + Send,
-            S: Send + Sync + 'static,
-            $( $ty: FromRequestParts<S> + Clone + Send + Sync + 'static, )*
-            $last: FromRequest<S> + Clone + Send + Sync + 'static,
-            Output: Serialize + Clone + Send + Sync + 'static,
-        {
-            type Future = Pin<Box<dyn Future<Output = Response> + Send>>;
-
-            fn call(self, req: Request<axum::body::Body>, state: S) -> Self::Future {
-                let (mut parts, body) = req.into_parts();
-
-                Box::pin(async move {
-                    $(
-                        let $ty = match $ty::from_request_parts(&mut parts, &state).await {
-                            Ok(value) => value,
-                            Err(rejection) => return rejection.into_response(),
-                        };
-                    )*
-
-                    let req = Request::from_parts(parts, body);
-
-                    let $last = match $last::from_request(req, &state).await {
-                        Ok(value) => value,
-                        Err(rejection) => return rejection.into_response(),
-                    };
-
-                    match (self.inner)($($ty,)* $last).await {
-                      Ok(output) => Json::<Output>(output).into_response(),
-                      Err(err) => err.into_response()
-                    }
-                })
-            }
+    fn into_procedure(self) -> Self::Procedure {
+        Procedure {
+            inner: self,
+            _marker: PhantomData,
         }
     }
 }
 
-impl_handler!([], T1);
-impl_handler!([T1], T2);
-impl_handler!([T1, T2], T3);
+//macro_rules! impl_into {
+//  ([$($ty:ident),* $(,)?]) => {
+//        impl<F, Fut, $($ty,)* Output, Error> IntoProcedure<( $($ty,)* ), (), Output, Error>
+//        for F
+//        where
+//            F: FnOnce( $($ty,)* ) -> Fut + Clone + Send + Sync + 'static,
+//            Fut: Future<Output = Result<Output, Error>> + Send + 'static,
+//            Output: Type + Clone + Send + Sync + 'static,
+//            Error: Type + Clone + Send + Sync + 'static,
+//        {
+//            type Procedure = Procedure<F, ( $( $ty, )* ), (), Output, Error>;
+//
+//            fn into_procedure(self) -> Self::Procedure {
+//                Procedure {
+//                    inner: self,
+//                    _marker: PhantomData,
+//                }
+//            }
+//        }
+//
+//        impl<F, Fut, $($ty,)* Input, Output, Error> IntoProcedure<( $($ty,)* ), Input, Output, Error>
+//        for F
+//        where
+//            F: FnOnce( $($ty,)* Input ) -> Fut + Clone + Send + Sync + 'static,
+//            Fut: Future<Output = Result<Output, Error>> + Send + 'static,
+//            Input: Type + Clone + Send + Sync + 'static,
+//            Output: Type + Clone + Send + Sync + 'static,
+//            Error: Type + Clone + Send + Sync + 'static,
+//        {
+//            type Procedure = Procedure<F, ( $( $ty, )* ), Input, Output, Error>;
+//
+//            fn into_procedure(self) -> Self::Procedure {
+//                Procedure {
+//                    inner: self,
+//                    _marker: PhantomData,
+//                }
+//            }
+//        }
+//    }
+//}
+//
+////impl_into!([]);
+//impl_into!([T1]);
+//impl_into!([T1, T2]);
 
-///
-///
-///
-///
-
-async fn handler(_h: HeaderMap, input: Json<Input>) -> ApiResult<Output> {
-    println!("IWASCALLED");
-    Ok(Output {
-        field: input.0.field,
-    })
+#[tokio::main]
+async fn main() {
+    //let p1 = p1.into_procedure();
+    let p2 = p2.into_procedure();
+    let p3 = p3.into_procedure();
 }
 
-async fn empty() -> ApiResult<Output> {
-    Ok(Output { field: "".into() })
-}
-
-async fn empty1(_h: HeaderMap) -> ApiResult<Output> {
-    Ok(Output { field: "".into() })
-}
-
-#[derive(Clone)]
-enum ApiError {
-    InternalError,
-}
-
-impl IntoResponse for ApiError {
-    fn into_response(self) -> axum::response::Response {
-        (axum::http::StatusCode::INTERNAL_SERVER_ERROR).into_response()
-    }
-}
-
-type ApiResult<T> = Result<T, ApiError>;
+use axum::http::HeaderMap;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 struct Input {
-    field: String,
+    #[specta(inline)]
+    field: Email,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+struct Email(String);
 
 #[derive(Clone, Serialize, Deserialize, Type)]
 struct Output {
     field: String,
 }
 
-pub struct ApiBuilder<S> {
-    router: Router<S>,
+#[derive(Clone, Serialize, Deserialize, Type)]
+enum ApiError {
+    InternalError,
 }
 
-impl<S> ApiBuilder<S>
-where
-    S: Clone + Send + Sync + 'static,
-{
-    pub fn new() -> Self {
-        Self {
-            router: Router::<S>::new(),
-        }
-    }
-
-    pub fn add<H, T: 'static, Input, Output>(mut self, name: &str, handler: H) -> Self
-    where
-        H: IntoApiHandler<Input, Output>,
-        H::Handler: Handler<T, S>,
-    {
-        self.router = self
-            .router
-            .route(&format!("/{}", name), post(handler.into_api_handler()));
-        self
-    }
-
-    pub fn build(self) -> Router<S> {
-        self.router
-    }
+async fn p1() -> Result<Output, ApiError> {
+    Ok(Output { field: "".into() })
 }
 
-#[tokio::main]
-async fn main() {
-    let api = ApiBuilder::new()
-        //.add("empty1", empty1)
-        .add("handler", handler)
-        .build();
+async fn p2(_h: HeaderMap) -> Result<Output, ApiError> {
+    Ok(Output { field: "".into() })
+}
 
-    let app = Router::new().merge(api);
-
-    //    //.route("empty", post(empty.into_api_handler()))
-    //    //.route("empty1", post(empty1.into()))
-    //    //.route("handler", post(handler.into())
-    //.route("handler", post(handler.into_api_handler()));
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
-        .await
-        .unwrap();
-    println!("listening on {}", listener.local_addr().unwrap());
-    axum::serve(listener, app).await.unwrap();
+async fn p3(_h: HeaderMap, _input: Input) -> Result<Output, ApiError> {
+    Ok(Output {
+        field: "WORKS".into(),
+    })
 }
