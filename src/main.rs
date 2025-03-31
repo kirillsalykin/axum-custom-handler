@@ -1,123 +1,49 @@
 use specta::Type;
-
 use std::marker::PhantomData;
 
 #[derive(Clone)]
 pub struct Procedure<F, Extractors, Input, Output, Error> {
-    inner: F,
+    f: F,
     _marker: PhantomData<(Extractors, Input, Output, Error)>,
 }
 
-pub trait IntoProcedure<const ARITY: usize, Extractors, Input, Output, Error> {
+pub trait IntoProcedure<Extractors, Input, Output, Error> {
     type Procedure;
     fn into_procedure(self) -> Self::Procedure;
 }
 
-pub struct NoInput;
+macro_rules! impl_into {
+  ([$($ty:ident),* $(,)?] ) => {
+        impl<F, Fut, $($ty,)* Input, Output, Error> IntoProcedure<( $($ty,)* ), Input, Output, Error>
+        for F
+        where
+            F: FnOnce( $($ty,)* Input ) -> Fut + Clone + Send + Sync + 'static,
+            Fut: Future<Output = Result<Output, Error>> + Send + 'static,
+            Input: Type + Clone + Send + Sync + 'static,
+            Output: Type + Clone + Send + Sync + 'static,
+            Error: Type + Clone + Send + Sync + 'static,
+        {
+            type Procedure = Procedure<F, ( $( $ty, )* ), Input, Output, Error>;
 
-impl<F, Fut, Input, Output, Error> IntoProcedure<1, (), Input, Output, Error> for F
-where
-    F: FnOnce(Input) -> Fut + Clone + Send + Sync + 'static,
-    Fut: Future<Output = Result<Output, Error>> + Send + 'static,
-    Input: Type + Clone + Send + Sync + 'static,
-    Output: Type + Clone + Send + Sync + 'static,
-    Error: Type + Clone + Send + Sync + 'static,
-{
-    type Procedure = Procedure<F, (), Input, Output, Error>;
-
-    fn into_procedure(self) -> Self::Procedure {
-        Procedure {
-            inner: self,
-            _marker: PhantomData,
+            fn into_procedure(self) -> Self::Procedure {
+                Procedure {
+                    f: self,
+                    _marker: PhantomData,
+                }
+            }
         }
     }
 }
 
-impl<F, Fut, T1, Output, Error> IntoProcedure<1, (T1,), (), Output, Error> for F
-where
-    F: FnOnce(T1) -> Fut + Clone + Send + Sync + 'static,
-    Fut: Future<Output = Result<Output, Error>> + Send + 'static,
-    Output: Type + Clone + Send + Sync + 'static,
-    Error: Type + Clone + Send + Sync + 'static,
-{
-    type Procedure = Procedure<F, (T1,), (), Output, Error>;
-
-    fn into_procedure(self) -> Self::Procedure {
-        Procedure {
-            inner: self,
-            _marker: PhantomData,
-        }
-    }
-}
-
-impl<F, Fut, T1, Input, Output, Error> IntoProcedure<2, (T1,), Input, Output, Error> for F
-where
-    F: FnOnce(T1, Input) -> Fut + Clone + Send + Sync + 'static,
-    Fut: Future<Output = Result<Output, Error>> + Send + 'static,
-    Input: Type + Clone + Send + Sync + 'static,
-    Output: Type + Clone + Send + Sync + 'static,
-    Error: Type + Clone + Send + Sync + 'static,
-{
-    type Procedure = Procedure<F, (T1,), Input, Output, Error>;
-
-    fn into_procedure(self) -> Self::Procedure {
-        Procedure {
-            inner: self,
-            _marker: PhantomData,
-        }
-    }
-}
-
-//macro_rules! impl_into {
-//  ([$($ty:ident),* $(,)?]) => {
-//        impl<F, Fut, $($ty,)* Output, Error> IntoProcedure<( $($ty,)* ), (), Output, Error>
-//        for F
-//        where
-//            F: FnOnce( $($ty,)* ) -> Fut + Clone + Send + Sync + 'static,
-//            Fut: Future<Output = Result<Output, Error>> + Send + 'static,
-//            Output: Type + Clone + Send + Sync + 'static,
-//            Error: Type + Clone + Send + Sync + 'static,
-//        {
-//            type Procedure = Procedure<F, ( $( $ty, )* ), (), Output, Error>;
-//
-//            fn into_procedure(self) -> Self::Procedure {
-//                Procedure {
-//                    inner: self,
-//                    _marker: PhantomData,
-//                }
-//            }
-//        }
-//
-//        impl<F, Fut, $($ty,)* Input, Output, Error> IntoProcedure<( $($ty,)* ), Input, Output, Error>
-//        for F
-//        where
-//            F: FnOnce( $($ty,)* Input ) -> Fut + Clone + Send + Sync + 'static,
-//            Fut: Future<Output = Result<Output, Error>> + Send + 'static,
-//            Input: Type + Clone + Send + Sync + 'static,
-//            Output: Type + Clone + Send + Sync + 'static,
-//            Error: Type + Clone + Send + Sync + 'static,
-//        {
-//            type Procedure = Procedure<F, ( $( $ty, )* ), Input, Output, Error>;
-//
-//            fn into_procedure(self) -> Self::Procedure {
-//                Procedure {
-//                    inner: self,
-//                    _marker: PhantomData,
-//                }
-//            }
-//        }
-//    }
-//}
-//
-////impl_into!([]);
-//impl_into!([T1]);
-//impl_into!([T1, T2]);
+impl_into!([]);
+impl_into!([T1]);
+impl_into!([T1, T2]);
 
 #[tokio::main]
 async fn main() {
-    //let p1 = p1.into_procedure();
-    let p2 = p2.into_procedure();
-    let p3 = p3.into_procedure();
+    let _p1 = p1.into_procedure();
+    let _p2 = p2.into_procedure();
+    let _p3 = p3.into_procedure();
 }
 
 use axum::http::HeaderMap;
@@ -142,11 +68,11 @@ enum ApiError {
     InternalError,
 }
 
-async fn p1() -> Result<Output, ApiError> {
+async fn p1(_input: ()) -> Result<Output, ApiError> {
     Ok(Output { field: "".into() })
 }
 
-async fn p2(_h: HeaderMap) -> Result<Output, ApiError> {
+async fn p2(_h: HeaderMap, _input: ()) -> Result<Output, ApiError> {
     Ok(Output { field: "".into() })
 }
 
