@@ -9,7 +9,7 @@ use axum::{
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, from_value};
-use specta::Type;
+use specta::{NamedType, Type};
 use std::{marker::PhantomData, pin::Pin};
 
 #[derive(Clone)]
@@ -97,12 +97,74 @@ impl_procedure!([]);
 impl_procedure!([T1]);
 impl_procedure!([T1, T2]);
 
+///////
+
+use specta::DataType;
+use specta::TypeCollection;
+
+pub struct Api<S> {
+    router: Router<S>,
+}
+
+impl<S> Api<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    pub fn new() -> Self {
+        Self {
+            router: Router::<S>::new(),
+        }
+    }
+
+    pub fn procedure<F, Extractors, Input, Output, Error, T: 'static>(
+        mut self,
+        name: &str,
+        f: F,
+    ) -> Self
+    where
+        F: IntoProcedure<Extractors, Input, Output, Error>,
+        F::Procedure: Handler<T, S>,
+        Input: Type,
+        Output: Type,
+        Error: Type,
+    {
+        println!("Registering endpoint '{}'", name);
+        let mut type_collection = TypeCollection::default();
+        println!(
+            "Input: {:?}",
+            <Input as Type>::definition(&mut type_collection)
+        );
+        println!(
+            "Output: {:?}",
+            <Output as Type>::definition(&mut type_collection)
+        );
+        println!("TYPES: {:?}", type_collection);
+
+        // https://discord.com/channels/1011665225809924136/1015433186299347005/threads/1356274733712150660
+        // https://github.com/specta-rs/rspc/blob/786bce8571993a7d0ca17aa023b095c9730ffdb1/src/internal/procedure/procedure_store.rs#L12
+
+        self.router = self
+            .router
+            .route(&format!("/{}", name), post(f.into_procedure()));
+        self
+    }
+
+    pub fn build(self) -> Router<S> {
+        self.router
+    }
+}
+
 #[tokio::main]
 async fn main() {
-    let app = Router::new()
-        .route("/p1", post(p1.into_procedure()))
-        .route("/p2", post(p2.into_procedure()))
-        .route("/p3", post(p3.into_procedure()));
+    // let mut types = TypeCollection::default();
+
+    let app = Api::new()
+        .procedure("p1", p1)
+        .procedure("p2", p2)
+        .procedure("p3", p3)
+        .build();
+
+    // let app = Router::new().merge(api);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
         .await
@@ -124,7 +186,7 @@ struct Input {
 struct Email(String);
 
 #[derive(Clone, Serialize, Deserialize, Type)]
-struct Output {
+pub struct Output {
     field: String,
 }
 
