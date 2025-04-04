@@ -8,26 +8,19 @@ trait Distilled: Sized {
 impl Distilled for String {
     type Error = &'static str;
     fn distill_from(value: Option<&Value>) -> Result<Self, Self::Error> {
-        match value {
-            Some(v) => v.as_str().map(String::from).ok_or("WRONG_TYPE"),
-            None => Err("NO_FIELD"),
-        }
+        value
+            .ok_or("NO_FIELD")
+            .and_then(|v| v.as_str().map(String::from).ok_or("WRONG_TYPE"))
     }
 }
 
 impl Distilled for u32 {
     type Error = &'static str;
     fn distill_from(value: Option<&Value>) -> Result<Self, Self::Error> {
-        match value {
-            Some(v) => {
-                if let Some(n) = v.as_i64() {
-                    u32::try_from(n).map_err(|_| "WRONG_TYPE")
-                } else {
-                    Err("WRONG_TYPE")
-                }
-            }
-            None => Err("NO_FIELD"),
-        }
+        value
+            .ok_or("NO_FIELD")
+            .and_then(|v| v.as_i64().ok_or("WRONG_TYPE"))
+            .and_then(|n| u32::try_from(n).map_err(|_| "WRONG_TYPE"))
     }
 }
 
@@ -97,7 +90,6 @@ async fn main() {
         "password": "password123"
     });
 
-    // Changed the call from `try_from` to `distill_from` using fully-qualified syntax:
-    let result = <SignUpInput as Distilled>::distill_from(Some(&v));
+    let result = SignUpInput::distill_from(Some(&v));
     println!("RESULT: {:?}", result);
 }
