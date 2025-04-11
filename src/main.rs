@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, hash::Hash};
 
 use serde_json::{Value, json};
 mod error;
@@ -63,43 +63,18 @@ struct SignUpInput {
     password: PlainTextPassword,
 }
 
-#[macro_export]
-macro_rules! try_field {
-    ($errors:ident, $field_name:expr, $expr:expr) => {
-        match $expr {
-            Ok(val) => Some(val),
-            Err(err) => {
-                $errors.insert($field_name.into(), err);
-                None
-            }
-        }
-    };
-}
-
 impl Distilled for SignUpInput {
     fn distill_from<'a, T: Into<Option<&'a Value>>>(value: T) -> Result<Self, Error> {
         let value = value.into().ok_or(Error::entry("missing_field"))?;
 
         let mut errors = HashMap::with_capacity(4);
 
-        let field_string = try_field!(
-            errors,
-            "field_string",
-            String::distill_from(value.get("field_string"))
-        );
-        let field_option = try_field!(
-            errors,
-            "field_option",
-            Option::<u32>::distill_from(value.get("field_option"))
-        );
-        let email = try_field!(errors, "email", Email::distill_from(value.get("email")));
-        let password = try_field!(
-            errors,
-            "password",
-            PlainTextPassword::distill_from(value.get("password"))
-        );
+        let field_string = String::distill_from(value.get("field_string"));
+        let field_option = Option::<u32>::distill_from(value.get("field_option"));
+        let email = Email::distill_from(value.get("email"));
+        let password = PlainTextPassword::distill_from(value.get("password"));
 
-        if errors.is_empty() {
+        if field_string.is_ok() && field_option.is_ok() && email.is_ok() && password.is_ok() {
             Ok(SignUpInput {
                 field_string: field_string.unwrap(),
                 field_option: field_option.unwrap(),
@@ -107,6 +82,22 @@ impl Distilled for SignUpInput {
                 password: password.unwrap(),
             })
         } else {
+            if field_string.is_err() {
+                errors.insert("field_string".into(), field_string.err().unwrap());
+            }
+
+            if field_option.is_err() {
+                errors.insert("field_option".into(), field_option.err().unwrap());
+            }
+
+            if email.is_err() {
+                errors.insert("email".into(), email.err().unwrap());
+            }
+
+            if password.is_err() {
+                errors.insert("password".into(), password.err().unwrap());
+            }
+
             Err(Error::Struct(errors))
         }
     }
