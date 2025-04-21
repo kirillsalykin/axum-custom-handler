@@ -1,118 +1,232 @@
-use std::{collections::HashMap, hash::Hash};
+use axum::{
+    Router,
+    body::Body,
+    extract::{FromRequest, FromRequestParts, Json},
+    handler::Handler,
+    http::Request,
+    response::{IntoResponse, Response},
+    routing::post,
+};
+use distilled::{Distilled, Error};
+use serde_json::Value;
+use specta::{NamedType, Type};
+use std::{marker::PhantomData, pin::Pin};
 
-use serde_json::{Value, json};
-mod error;
-use error::Error;
-
-trait Distilled: Sized {
-    fn distill_from<'a, T: Into<Option<&'a Value>>>(value: T) -> Result<Self, Error>;
+#[derive(Clone)]
+pub struct Procedure<F, Extractors, Input, Output, Error> {
+    f: F,
+    _marker: PhantomData<(Extractors, Input, Output, Error)>,
 }
 
-impl Distilled for String {
-    fn distill_from<'a, T: Into<Option<&'a Value>>>(value: T) -> Result<Self, Error> {
-        let value = value.into().ok_or(Error::entry("missing_field"))?;
-        value
-            .as_str()
-            .map(String::from)
-            .ok_or(Error::entry("wrong_type"))
-    }
+pub trait IntoProcedure<Extractors, Input, Output, Error> {
+    type Procedure;
+    fn into_procedure(self) -> Self::Procedure;
 }
 
-impl Distilled for u32 {
-    fn distill_from<'a, T: Into<Option<&'a Value>>>(value: T) -> Result<Self, Error> {
-        let value = value.into().ok_or(Error::entry("missing_field"))?;
-        let n = value.as_i64().ok_or(Error::entry("wrong_type"))?;
-        u32::try_from(n).map_err(|_| Error::entry("wrong_type"))
-    }
-}
+macro_rules! impl_procedure {
+  ([$($ty:ident),* $(,)?] ) => {
+        impl<F, Fut, $($ty,)* Input, Output, Error> IntoProcedure<( $($ty,)* ), Input, Output, Error>
+        for F
+        where
+            F: FnOnce( $($ty,)* Input ) -> Fut + Clone + Send + Sync + 'static,
+            Fut: Future<Output = Result<Output, Error>> + Send + 'static,
+            Input: Type + Distilled + Clone + Send + Sync + 'static,
+            Output: Type + Serialize + Clone + Send + Sync + 'static,
+            Error: Type + Clone + Send + Sync + 'static,
+        {
+            type Procedure = Procedure<F, ( $( $ty, )* ), Input, Output, Error>;
 
-impl<T: Distilled> Distilled for Option<T> {
-    fn distill_from<'a, U: Into<Option<&'a Value>>>(value: U) -> Result<Self, Error> {
-        match value.into() {
-            Some(v) => Ok(Some(T::distill_from(v)?)),
-            None => Ok(None),
+            fn into_procedure(self) -> Self::Procedure {
+                Procedure {
+                    f: self,
+                    _marker: PhantomData,
+                }
+            }
+        }
+
+        impl<F, Fut, S, $($ty,)* Input, Output, Error> Handler< (Input, $($ty,)* Output), S>
+        for Procedure<F, ( $($ty,)* ), Input, Output, Error>
+        where
+            F: FnOnce( $( $ty, )* Input ) -> Fut + Clone + Send + Sync + 'static,
+            Fut: Future<Output = Result<Output, Error>> + Send,
+            S: Send + Sync + 'static,
+            $( $ty: FromRequestParts<S> + Clone + Send + Sync + 'static, )*
+            Input: Type + Distilled + Clone + Send + Sync + 'static,
+            Output: Type + Serialize + Clone + Send + Sync + 'static,
+            Error: Type + Serialize + Clone + Send + Sync + 'static,
+        {
+            type Future = Pin<Box<dyn Future<Output = Response> + Send>>;
+
+            fn call(self, req: Request<Body>, state: S) -> Self::Future {
+                let (mut parts, body) = req.into_parts();
+
+                Box::pin(async move {
+                    $(
+                        let $ty = match $ty::from_request_parts(&mut parts, &state).await {
+                            Ok(value) => value,
+                            Err(rejection) => return rejection.into_response(),
+                        };
+                    )*
+
+                    let req = Request::from_parts(parts, body);
+
+                    let input_value = match Json::<Value>::from_request(req, &state).await {
+                        Ok(value) => value.0,
+                        Err(rejection) => return rejection.into_response(),
+                    };
+
+                    let input: Input = match Input::distill(&input_value) {
+                        Ok(input) => input,
+                        Err(_) => {
+                            return "json_bad".into_response()
+                        },
+                    };
+
+                    match (self.f)($($ty,)* input).await {
+                      Ok(output) => Json::<Output>(output).into_response(),
+                      Err(_) => "error".into_response()
+                    }
+                })
+            }
         }
     }
 }
 
-#[derive(Debug, Clone)]
-struct Email(String);
+impl_procedure!([]);
+impl_procedure!([T1]);
+impl_procedure!([T1, T2]);
 
-impl Distilled for Email {
-    fn distill_from<'a, T: Into<Option<&'a Value>>>(value: T) -> Result<Self, Error> {
-        let s = String::distill_from(value)?;
-        Ok(Email(s))
-    }
+///////
+
+use specta::DataType;
+use specta::TypeCollection;
+
+pub struct Api<S> {
+    router: Router<S>,
 }
 
-#[derive(Debug, Clone)]
-struct PlainTextPassword(String);
-
-impl Distilled for PlainTextPassword {
-    fn distill_from<'a, T: Into<Option<&'a Value>>>(value: T) -> Result<Self, Error> {
-        let s = String::distill_from(value)?;
-        Ok(PlainTextPassword(s))
-    }
-}
-
-#[derive(Debug, Clone)]
-struct SignUpInput {
-    field_string: String,
-    field_option: Option<u32>,
-    email: Email,
-    password: PlainTextPassword,
-}
-
-impl Distilled for SignUpInput {
-    fn distill_from<'a, T: Into<Option<&'a Value>>>(value: T) -> Result<Self, Error> {
-        let value = value.into().ok_or(Error::entry("missing_field"))?;
-
-        let mut errors = HashMap::with_capacity(4);
-
-        let field_string = String::distill_from(value.get("field_string"));
-        let field_option = Option::<u32>::distill_from(value.get("field_option"));
-        let email = Email::distill_from(value.get("email"));
-        let password = PlainTextPassword::distill_from(value.get("password"));
-
-        if field_string.is_ok() && field_option.is_ok() && email.is_ok() && password.is_ok() {
-            Ok(SignUpInput {
-                field_string: field_string.unwrap(),
-                field_option: field_option.unwrap(),
-                email: email.unwrap(),
-                password: password.unwrap(),
-            })
-        } else {
-            if field_string.is_err() {
-                errors.insert("field_string".into(), field_string.err().unwrap());
-            }
-
-            if field_option.is_err() {
-                errors.insert("field_option".into(), field_option.err().unwrap());
-            }
-
-            if email.is_err() {
-                errors.insert("email".into(), email.err().unwrap());
-            }
-
-            if password.is_err() {
-                errors.insert("password".into(), password.err().unwrap());
-            }
-
-            Err(Error::Struct(errors))
+impl<S> Api<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    pub fn new() -> Self {
+        Self {
+            router: Router::<S>::new(),
         }
+    }
+
+    pub fn procedure<F, Extractors, Input, Output, Error, T: 'static>(
+        mut self,
+        name: &str,
+        f: F,
+    ) -> Self
+    where
+        F: IntoProcedure<Extractors, Input, Output, Error>,
+        F::Procedure: Handler<T, S>,
+        Input: Type + Distilled,
+        Output: Type + Serialize,
+        Error: Type + Serialize,
+    {
+        // println!("Registering endpoint '{}'", name);
+        // let mut type_collection = TypeCollection::default();
+        // println!(
+        //     "Input: {:?}",
+        //     <Input as Type>::definition(&mut type_collection)
+        // );
+        // println!(
+        //     "Output: {:?}",
+        //     <Output as Type>::definition(&mut type_collection)
+        // );
+        // println!("TYPES: {:?}", type_collection);
+
+        // https://discord.com/channels/1011665225809924136/1015433186299347005/threads/1356274733712150660
+        // https://github.com/specta-rs/rspc/blob/786bce8571993a7d0ca17aa023b095c9730ffdb1/src/internal/procedure/procedure_store.rs#L12
+
+        self.router = self
+            .router
+            .route(&format!("/{}", name), post(f.into_procedure()));
+        self
+    }
+
+    pub fn build(self) -> Router<S> {
+        self.router
     }
 }
 
 #[tokio::main]
 async fn main() {
-    let v = json!({
-         "field_string": "Some string",
-         "field_option": -1,  // Optional field example.
-        "email": "user@example.com",
-        "password": "password123"
-    });
+    // let mut types = TypeCollection::default();
 
-    let result_from_value = SignUpInput::distill_from(&v);
+    let app = Api::new()
+        .procedure("p1", p1)
+        .procedure("p2", p2)
+        .procedure("p3", p3)
+        .procedure("p4", p4)
+        .build();
 
-    println!("RESULT from &Value: {:?}", result_from_value);
+    // let app = Router::new().merge(api);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
+        .await
+        .unwrap();
+    println!("listening on {}", listener.local_addr().unwrap());
+    axum::serve(listener, app).await.unwrap();
 }
+
+use axum::http::HeaderMap;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Distilled, Type)]
+struct Input {
+    #[specta(inline)]
+    field: Email,
+}
+
+#[derive(Clone, Serialize, Deserialize, Type)]
+pub struct Output {
+    field: String,
+}
+
+#[derive(Clone, Serialize, Deserialize, Type)]
+enum ApiError {
+    InternalError,
+}
+
+async fn p1(_input: ()) -> Result<Output, ApiError> {
+    println!("p1: {:?}", _input);
+    Ok(Output { field: "".into() })
+}
+
+async fn p2(_h: HeaderMap, _input: ()) -> Result<Output, ApiError> {
+    println!("p2: {:?}", _input);
+    Ok(Output { field: "".into() })
+}
+
+async fn p3(_h: HeaderMap, _input: Input) -> Result<Output, ApiError> {
+    println!("p3: {:?}", _input);
+    Ok(Output {
+        field: "WORKS".into(),
+    })
+}
+
+async fn p4(_h: HeaderMap, input: SignUpInput) -> Result<Output, ApiError> {
+    println!("p4: {:?}", input);
+    Ok(Output {
+        field: "WORKS".into(),
+    })
+}
+
+#[derive(Debug, Clone, Distilled, Type)]
+struct SignUpInput {
+    #[specta(inline)]
+    email: Email,
+
+    #[specta(inline)]
+    password: PlainTextPassword,
+}
+
+#[derive(Debug, Clone, Distilled, Type)]
+struct Email(#[distilled(rules(email))] String);
+
+#[derive(Debug, Clone, Distilled, Type)]
+struct PlainTextPassword(String);

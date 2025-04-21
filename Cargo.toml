@@ -9,3 +9,5 @@ axum = { version = "0.8.1", features = ["macros"] }
 specta = { git = "https://github.com/specta-rs/specta.git", branch = "main", default-features = false, features = ["derive", "serde", "export"] }
 serde = { version = "1.0.209", features = ["derive"] }
 serde_json = { version = "1.0.140" }
+distilled = { git = "https://github.com/kirillsalykin/distilled", rev = "a35b37c", features = ["derive"] }
+validator = { version = "0.20"}
